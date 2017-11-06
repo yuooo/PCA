@@ -38,7 +38,7 @@ import mnist_classifier as mc
 FLAGS = None
     
 def low_eigenvalues_projection(pca, X, n_eigenvalues):
-    print("start low_eigenvalues_projection")
+#    print("start low_eigenvalues_projection")
     check_is_fitted(pca, ['mean_', 'components_'], all_or_any=all)
 
     X = check_array(X)
@@ -47,76 +47,43 @@ def low_eigenvalues_projection(pca, X, n_eigenvalues):
     X_transformed = np.dot(X, pca.components_[-n_eigenvalues:].T)
     if pca.whiten:
         X_transformed /= np.sqrt(pca.explained_variance_)
-    print("end low_eigenvalues_projection")
+#    print("end low_eigenvalues_projection")
     print()
     return X_transformed
 
+def get_dist(X):
+    return np.sum(X**2, axis=1)
 
-
-def get_dist(X, mu):
-    return np.sum((X-mu)**2, axis=1)
-
-def pca_first_class(train, test, adv, y_train, y_test, y_adv, y_real):
+def adversarial_classification(X, y, class0, pca, n_eigen, name):
+#    print("start adversarial_classification")
+    
+    index_class0 = y == class0
+    X_for_PCA = X[index_class0]
+    
+    X_shrunk = low_eigenvalues_projection(pca, X_for_PCA, n_eigen)
+    X_norm = get_dist(X_shrunk)
+    print("%s average norm %g" % (name, np.mean(X_norm)))
+    
+    adv_predicted = np.sum(X_norm > 0.01) 
+    
+    print("%s classified as adversary: %d, or %g percents.\n" % (name, adv_predicted, adv_predicted*100/ len(X_norm)))
+#    print("end adversarial_classification")
+    
+def pca_first_class(train, test, adv, noise, y_train, y_test, y_adv, y_noise, y_real):
     print("start pca_first_class")
-    mnist = input_data.read_data_sets('/tmp/tensorflow/mnist/input_data', one_hot=False)
-    
-    
     ### PCA on train for first class
-    label_for_PCA = y_train[0]
-    index_train_class_0 = y_train == label_for_PCA
-    train_for_PCA = train[index_train_class_0]
+    class0 = y_train[0]
+    index_train_class0 = y_train == class0
+    train_for_PCA = train[index_train_class0]
     
-    index_test_class_0 = y_test == label_for_PCA
-    test_for_PCA = test[index_test_class_0]
-    
-    index_adv_class_0 = y_adv == label_for_PCA
-    adv_for_PCA = adv[index_adv_class_0]
-        
-#    print(train_for_PCA.shape)
-#    print(mnist.train.labels[index_class_0])
-
     pca = PCA()
     pca.fit(train_for_PCA)
-#    print(pca)
-    
-#    print(pca.explained_variance_ratio_[:10])
-#    print(pca.explained_variance_ratio_[-10:])
     n_eigenvalues_kept = 10
-    train_shrunk = low_eigenvalues_projection(pca, train_for_PCA, n_eigenvalues_kept)
-#    print(train_shrunk[:10])
-    train_norm = np.linalg.norm(train_shrunk, axis=1)
-    print("train_norm average %g" % np.mean(train_norm))
-
-    test_shrunk = low_eigenvalues_projection(pca, test_for_PCA, n_eigenvalues_kept)
-#    print(test_shrunk[:10])
-    test_norm = np.linalg.norm(test_shrunk, axis=1)
-    print("test_norm average %g" % np.mean(test_norm))
     
-    adv_shrunk = low_eigenvalues_projection(pca, adv_for_PCA, n_eigenvalues_kept)
-#    print(adv_shrunk[:10])
-    adv_norm = np.linalg.norm(adv_shrunk, axis=1)
-    print("adv_norm average %g" % np.mean(adv_norm))
-    
-#    x = range(len(train_norm))
-#    plt.plot(train_norm, marker="*")
-#    plt.show()
-
-    ### Classify as adversarial or not
-    adv_test_predicted = np.sum(test_norm > 0.01) 
-    adv_adv_predicted = np.sum(adv_norm > 0.01) 
-    
-    print("test classified as adversary:")
-    print(adv_test_predicted)
-    print(adv_test_predicted / len(test_norm))
-    print()
-    
-    print("adversary classified as adversary:")
-    print(adv_adv_predicted)
-    print(adv_adv_predicted / len(adv_norm))
-    print()
-    
-    print("end pca_first_class")
-    print()
+    adversarial_classification(test, y_test, class0, pca, n_eigenvalues_kept, "test")
+    adversarial_classification(adv, y_adv, class0, pca, n_eigenvalues_kept, "adversary")
+    adversarial_classification(noise, y_noise, class0, pca, n_eigenvalues_kept, "noise")
+    print("\nend pca_first_class \n\n\n")
     
     
 
@@ -149,13 +116,14 @@ def classifier(_):
         real_labels = tf.argmax(y_, 1)
 
         # Create adversarial images with FSG Method
-
         img_gradients = tf.gradients(cross_entropy, x)[0]
         epsilon = 0.2
         adversarial_images = x + epsilon*tf.sign(img_gradients)
 
-
+        # Create noisy data
+        noisy_image = x + epsilon*tf.random_uniform(tf.shape(x), minval=-1, maxval=1, seed=12)
         
+        # Others
         config = tf.ConfigProto()
         config.gpu_options.allow_growth = True
 
@@ -183,16 +151,39 @@ def classifier(_):
             
             y_real = real_labels.eval(feed_dict={
                     x: mnist.test.images, y_: mnist.test.labels, keep_prob: 1.0})
+    
+            noise_images = noisy_image.eval(feed_dict = {
+                    x: mnist.test.images, y_: mnist.test.labels, keep_prob: 1.0})
+    
+            y_noise = predicted_labels.eval(feed_dict={
+                    x: noise_images, y_: mnist.test.labels, keep_prob: 1.0})
+    
+            print('train accuracy %g' % accuracy.eval(feed_dict={
+                    x: mnist.train.images[1:10000], y_: mnist.train.labels[1:10000], keep_prob: 1.0}))
+            print('test accuracy %g' % accuracy.eval(feed_dict={
+                    x: mnist.test.images[1:10000], y_: mnist.test.labels[1:10000], keep_prob: 1.0}))
+            print('adversarial accuracy %g' % accuracy.eval(feed_dict={
+                    x: adv_images, y_: mnist.test.labels, keep_prob: 1.0}))
+            print('noise accuracy %g' % accuracy.eval(feed_dict={
+                    x: noise_images, y_: mnist.test.labels, keep_prob: 1.0}))
+
+    
+            
             
             print("end main")
             print()
-            return y_test, adv_images, y_adv, y_real
+            return y_test, adv_images, y_adv, y_real, noise_images, y_noise
             
             
 #            print('train accuracy %g' % accuracy.eval(feed_dict={
 #                    x: mnist.train.images[1:10000], y_: mnist.train.labels[1:10000], keep_prob: 1.0}))
 #            print('test accuracy %g' % accuracy.eval(feed_dict={
 #                    x: mnist.test.images[1:10000], y_: mnist.test.labels[1:10000], keep_prob: 1.0}))
+#            print('adversarial accuracy %g' % accuracy.eval(feed_dict={
+#                    x: adv_images, y_: mnist.test.labels, keep_prob: 1.0}))
+#            print('noise accuracy %g' % accuracy.eval(feed_dict={
+#                    x: noise_images, y_: mnist.test.labels, keep_prob: 1.0}))
+
 #            
 
 #            print(train.shape)
@@ -203,9 +194,7 @@ def classifier(_):
 
             # # gradients = img_gradients.eval(feed_dict = {
             # #     x: mnist.test.images, y_: mnist.test.labels, keep_prob: 1.0})
-#            print('adversarial accuracy %g' % accuracy.eval(feed_dict={
-#                    x: adv_images, y_: mnist.test.labels, keep_prob: 1.0}))
-
+           
             # print(gradients[0])
             # print(adv_images[0])
 
@@ -217,7 +206,7 @@ if __name__ == '__main__':
                       default='/tmp/tensorflow/mnist/input_data',
                       help='Directory for storing input data')
     FLAGS, unparsed = parser.parse_known_args()
-    y_test, adv_images, y_adv, y_real = classifier([sys.argv[0]] + unparsed)
+    y_test, adv_images, y_adv, y_real, noise_images, y_noise = classifier([sys.argv[0]] + unparsed)
     print()
     print()
     
@@ -227,11 +216,8 @@ if __name__ == '__main__':
     y_train = mnist.train.labels
     test = mnist.test.images
     
-    pca_first_class(train, test, adv_images, y_train, y_test, y_adv, y_real)
+    pca_first_class(train, test, noise_images, adv_images, y_train, y_test, y_adv, y_noise, y_real)
     
-    print()
-    print()
-    print()
     
 #    print(y_test[:10])
 #    print(y_real[:10])
